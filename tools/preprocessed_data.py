@@ -4,13 +4,18 @@ Adapted from Megatron-LM tools/preprocess_data.py.
 Uses HuggingFace tokenizers instead of the Megatron tokenizer framework,
 and the self-contained IndexedDatasetBuilder from dataset/indexed_dataset.py.
 
+Documents are tokenized, concatenated into one token stream per JSON key,
+and cut into fixed-length chunks of `--seq-length` tokens. Each chunk is
+stored as one sequence/document in the output. The final partial chunk is
+right-padded with the pad token.
+
 Usage:
     python tools/preprocessed_data.py \
-        --input data/smoltalk.jsonl \
-        --output-prefix data/smoltalk \
-        --tokenizer-name-or-path HuggingFaceTB/SmolLM2-135M \
+        --input data/tinystories.jsonl \
+        --output-prefix data/tinystories \
         --json-keys text \
         --append-eod \
+        --seq-length 512 \
         --workers 8
 """
 
@@ -24,29 +29,54 @@ import os
 import sys
 import time
 
-import numpy as np
-
 sys.path.append(
     os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir))
 )
 
 from dataset.indexed_dataset import DType, IndexedDatasetBuilder
 
+TOKENIZER_PATH = "NousResearch/Llama-3.2-1B"
+
+# Llama 3 `<|finetune_right_pad_id|>`. Used when the tokenizer defines no pad
+# token. Must match the pad id used by PackingDataset in dataset/indexed_dataset.py.
+DEFAULT_PAD_TOKEN_ID = 128004
+
+
+def load_tokenizer(trust_remote_code):
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(
+        TOKENIZER_PATH, trust_remote_code=trust_remote_code
+    )
+
 
 class Encoder:
     """Tokenizes JSON lines using a HuggingFace tokenizer.
 
-    The tokenizer is initialized once per worker process via `initializer()`,
-    then shared across all `encode()` calls in that process.
+    The encoder (and its tokenizer) is pickled to each pool worker along with
+    the bound `encode` method, so every worker holds its own tokenizer copy.
     """
 
     def __init__(self, args, tokenizer):
         self.args = args
         self.tokenizer = tokenizer
-        self.padding_token_id = self.tokenizer.pad_token_id = 128004
-        self.eos_token_id = self.tokenizer.eos_token_id
-        self.begin_of_text_token_id = self.tokenizer.bos_token_id
 
+        if args.pad_id is not None:
+            self.padding_token_id = args.pad_id
+        elif tokenizer.pad_token_id is not None:
+            self.padding_token_id = tokenizer.pad_token_id
+        else:
+            self.padding_token_id = DEFAULT_PAD_TOKEN_ID
+
+        if args.eod_id is not None:
+            self.eod_token_id = args.eod_id
+        else:
+            self.eod_token_id = tokenizer.eos_token_id
+        if args.append_eod and self.eod_token_id is None:
+            raise ValueError(
+                "--append-eod requested but the tokenizer has no eos token; "
+                "pass --eod-id explicitly."
+            )
 
     def encode(self, json_line):
         data = json.loads(json_line)
@@ -64,6 +94,9 @@ class Encoder:
                 if len(sentence_ids) > 0:
                     doc_ids.extend(sentence_ids)
                     sentence_lens.append(len(sentence_ids))
+            if self.args.append_eod and len(doc_ids) > 0:
+                doc_ids.append(self.eod_token_id)
+                sentence_lens[-1] += 1
             ids[key] = doc_ids
             lens[key] = sentence_lens
         return ids, lens, len(json_line)
@@ -75,12 +108,6 @@ def get_args():
     )
 
     parser.add_argument(
-        "--tokenizer-name-or-path",
-        type=str,
-        required=True,
-        help="HuggingFace tokenizer name or local path (e.g. 'gpt2', 'meta-llama/Llama-2-7b-hf')",
-    )
-    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
         help="Allow loading tokenizers with custom code from the Hub.",
@@ -90,6 +117,15 @@ def get_args():
         type=int,
         default=None,
         help="Override end-of-document token id (defaults to tokenizer.eos_token_id).",
+    )
+    parser.add_argument(
+        "--pad-id",
+        type=int,
+        default=None,
+        help=(
+            "Override pad token id used to fill the last chunk "
+            f"(defaults to tokenizer.pad_token_id, then {DEFAULT_PAD_TOKEN_ID})."
+        ),
     )
     parser.add_argument(
         "--input", type=str, required=True, help="Path to input JSONL file"
@@ -171,54 +207,46 @@ def process_json_file(input_file_name, output_prefix, args, num_workers):
     fin = open(input_file_name, "r", encoding="utf-8")
 
     startup_start = time.time()
-    SEQ_LENGTH = args.seq_length
+    seq_length = args.seq_length
 
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer_name_or_path, trust_remote_code=args.trust_remote_code
-    )
+    tokenizer = load_tokenizer(args.trust_remote_code)
     vocab_size = tokenizer.vocab_size
     encoder = Encoder(args, tokenizer)
 
     pool = multiprocessing.Pool(num_workers)
     encoded_docs = pool.imap(encoder.encode, fin, 32)
 
-    output_bin_files = {}
     output_idx_files = {}
     builders = {}
+    # Leftover tokens (fewer than seq_length) carried over to the next document.
+    caches = {}
 
     for key in args.json_keys:
-        output_bin_files[key] = "{}_{}_{}.bin".format(output_prefix, key, "document")
+        output_bin_file = "{}_{}_{}.bin".format(output_prefix, key, "document")
         output_idx_files[key] = "{}_{}_{}.idx".format(output_prefix, key, "document")
         builders[key] = IndexedDatasetBuilder(
-            output_bin_files[key],
+            output_bin_file,
             dtype=DType.optimal_dtype(vocab_size),
         )
+        caches[key] = []
 
     startup_end = time.time()
     proc_start = time.time()
     total_bytes_processed = 0
     print("Time to startup:", startup_end - startup_start)
-    cache = []
-    KEY = args.json_keys[0]
-    for i, (doc, sentence_lens, bytes_processed) in enumerate(encoded_docs, start=1):
+
+    i = 0
+    for i, (doc, _sentence_lens, bytes_processed) in enumerate(encoded_docs, start=1):
         total_bytes_processed += bytes_processed
-        chunks = []
-        if len(cache) > SEQ_LENGTH:
-            chunks.append(cache[:SEQ_LENGTH])
-            cache = cache[SEQ_LENGTH:]
-        document = doc[KEY]
-        if len(cache) > 0:
-            document.extend(cache)
-            cache = []
-        steps = len(document) // SEQ_LENGTH
-        for step in range(steps):
-            chunk = document[step*SEQ_LENGTH:step*SEQ_LENGTH + SEQ_LENGTH]
-            chunks.append(chunk)
-        cache.extend(document[steps*SEQ_LENGTH:steps*SEQ_LENGTH + len(document)])
-        for chunk in chunks:
-            builders[KEY].add_document(chunk, [len(chunk)])
+        for key in args.json_keys:
+            # Leftover from the previous document goes first, so token order
+            # across the packed stream matches the input order.
+            stream = caches[key] + doc[key]
+            num_full = len(stream) // seq_length
+            for step in range(num_full):
+                chunk = stream[step * seq_length : (step + 1) * seq_length]
+                builders[key].add_document(chunk, [len(chunk)])
+            caches[key] = stream[num_full * seq_length :]
         if i % args.log_interval == 0:
             current = time.time()
             elapsed = current - proc_start
@@ -227,16 +255,29 @@ def process_json_file(input_file_name, output_prefix, args, num_workers):
                 f"Processed {i} documents ({i / elapsed:.1f} docs/s, {mbs:.2f} MB/s).",
                 file=sys.stderr,
             )
-    remaining = SEQ_LENGTH - len(cache)
-    cache.extend([encoder.padding_token_id] * remaining)
-    builders[KEY].add_document(cache, [len(cache)])
-    fin.close()
-    builders[KEY].finalize(output_idx_files[KEY])
 
+    for key in args.json_keys:
+        cache = caches[key]
+        if len(cache) > 0:
+            cache.extend([encoder.padding_token_id] * (seq_length - len(cache)))
+            builders[key].add_document(cache, [len(cache)])
+        builders[key].finalize(output_idx_files[key])
+
+    fin.close()
     pool.close()
     pool.join()
 
     print(f"Done. Processed {i} documents total.")
+
+
+def _process_partition(name, args, num_workers, q):
+    """Entry point for one partition subprocess.
+
+    Defined at module level so it can be pickled under the `spawn` start
+    method (the default on macOS and Windows).
+    """
+    process_json_file(name["partition"], name["output_prefix"], args, num_workers)
+    q.put(True)
 
 
 def main():
@@ -301,14 +342,11 @@ def main():
         processes = []
         q = multiprocessing.Queue()
 
-        def _process_partition(name, q):
-            process_json_file(
-                name["partition"], name["output_prefix"], args, workers_per_partition
-            )
-            q.put(True)
-
         for name in in_ss_out_names:
-            p = multiprocessing.Process(target=_process_partition, args=(name, q))
+            p = multiprocessing.Process(
+                target=_process_partition,
+                args=(name, args, workers_per_partition, q),
+            )
             p.start()
             processes.append(p)
 
@@ -319,12 +357,7 @@ def main():
             p.join()
 
         # Merge partitions
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.tokenizer_name_or_path, trust_remote_code=args.trust_remote_code
-        )
-        vocab_size = tokenizer.vocab_size
+        vocab_size = load_tokenizer(args.trust_remote_code).vocab_size
 
         for key in args.json_keys:
             output_bin = "{}_{}_{}.bin".format(args.output_prefix, key, "document")
