@@ -1,0 +1,18 @@
+services:
+  training:
+    build: .
+    container_name: ddp-training
+    command: tail -f /dev/null
+    working_dir: /workspace
+    volumes:
+      - ./scripts:/workspace/scripts
+    environment:
+      # Intra-op threads per rank. On CPU-only runs each torchrun worker
+      # should get cpus / world_size cores, otherwise every rank is pinned
+      # to a single core. Default assumes 8 CPUs and 2 ranks; override with
+      # e.g. `OMP_NUM_THREADS=2 docker compose up` for 4 ranks.
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+    deploy:
+      resources:
+        limits:
+          cpus: "8"

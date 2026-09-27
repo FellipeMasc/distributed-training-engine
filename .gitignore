@@ -1,3 +1,5 @@
 *.pyc
 __pycache__/
 *brainstorming*
+*hf_model_safetensors*
+*dataset/data/*
