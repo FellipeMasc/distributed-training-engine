@@ -1,8 +1,8 @@
 import os
 from datasets import load_dataset
 import json
-# ds = load_dataset("Dxniz/TinyStories-Multilingual", split='train')
-# ds.to_json('data/tinystories.jsonl', force_ascii=False)
+ds = load_dataset("Dxniz/TinyStories-Multilingual", split='train')
+ds.to_json('data/tinystories.jsonl', force_ascii=False)
 
 if not os.path.exists('data/tinystories-portuguese.jsonl'):
     os.makedirs('data', exist_ok=True)
