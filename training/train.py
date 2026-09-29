@@ -31,6 +31,13 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from core.distributed.tensor.module import TensorParallelModule
 
 from tools.preprocessed_data import document_prefix, preprocess_jsonl
+from training.metrics import (
+    TrainingMetrics,
+    format_summary,
+    load_baseline,
+    scaling_efficiency,
+    write_summary,
+)
 
 IGNORE_INDEX = -100
 TOKENIZER_NAME = "NousResearch/Llama-3.2-1B"
@@ -122,6 +129,36 @@ def parser_args():
         default=None,
         choices=[None, "nccl", "gloo"],
         help="Distributed backend. Defaults to nccl on CUDA, otherwise gloo.",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=1,
+        help="Steps excluded from throughput averaging (first steps pay lazy init costs).",
+    )
+    parser.add_argument("--log-interval", type=int, default=1, help="Print metrics every N steps.")
+    parser.add_argument(
+        "--metrics-out",
+        type=str,
+        default=None,
+        help=(
+            "Where to write the JSON benchmark summary. Defaults to "
+            "benchmarks/<dp,tp,pp,cp,seq,mbs,dtype>.json under the project root."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-metrics",
+        type=str,
+        default=None,
+        help=(
+            "JSON summary of a previous run (e.g. single-device) to compute "
+            "scaling efficiency against."
+        ),
+    )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip writing the PNG charts next to the JSON summary (tools/plot_metrics.py).",
     )
     parser.add_argument(
         "--conversation",
@@ -416,12 +453,40 @@ def train():
     step = 0
 
     rank = dist.get_rank()
+    # The loss lives on the last pipeline stage, so live logging comes from
+    # the first rank of that stage rather than global rank 0.
+    is_log_rank = (
+        comm_groups_config.is_last_stage
+        and dp_rank == 0
+        and dist.get_rank(group=tp_group) == 0
+        and dist.get_rank(group=cp_group) == 0
+    )
+    metrics = TrainingMetrics(
+        tokens_per_step=args.micro_batch_size * args.seq_length * dp_size,
+        device=device,
+        warmup_steps=args.warmup_steps,
+        is_log_rank=is_log_rank,
+        config={
+            "model_name": args.model_name,
+            "num_hidden_layers": model_config.num_hidden_layers,
+            "seq_length": args.seq_length,
+            "micro_batch_size": args.micro_batch_size,
+            "num_microbatches": num_microbatches if use_pipeline else 1,
+            "dtype": args.dtype,
+            "backend": backend,
+            "device": device.type,
+            "parallelism": {"dp": inferred_dp, "tp": args.tp, "pp": args.pp, "cp": args.cp},
+            "max_steps": args.max_steps,
+        },
+    )
+
     print(f"Rank {rank} starting training")
     while step < args.max_steps:
         for batch in dataloader:
             tokens = batch["tokens"].to(device)
             labels = batch["labels"].to(device)
 
+            metrics.start_step()
             if use_pipeline:
                 loss_val = training_step_1f1b(
                     model, tokens, labels, optimizer, dtype=model_dtype, dp_group=dp_group
@@ -430,13 +495,40 @@ def train():
                 loss_val = training_step(
                     model, tokens, labels, optimizer, model_config, dp_group=dp_group
                 )
+            metrics.end_step(loss_val)
             step += 1
-            if rank == 0 and loss_val is not None:
-                print(f"step {step}/{args.max_steps} | loss {loss_val:.4f}")
+            if is_log_rank and (step % args.log_interval == 0 or step == args.max_steps):
+                print(metrics.step_line(step, args.max_steps), flush=True)
             if step >= args.max_steps:
                 break
 
     dist.barrier()
+    summary = metrics.gather_summary()
+    if summary is not None:  # global rank 0
+        if args.baseline_metrics:
+            summary["scaling"] = scaling_efficiency(summary, load_baseline(args.baseline_metrics))
+        out = args.metrics_out or str(
+            PROJECT_ROOT
+            / "benchmarks"
+            / (
+                f"dp{inferred_dp}_tp{args.tp}_pp{args.pp}_cp{args.cp}"
+                f"_seq{args.seq_length}_mbs{args.micro_batch_size}_{args.dtype}.json"
+            )
+        )
+        write_summary(summary, out)
+        print(format_summary(summary), flush=True)
+        print(f"Metrics written to {out}", flush=True)
+        if not args.no_plots:
+            try:
+                from tools.plot_metrics import plot_run
+
+                plot_dir = os.path.join(
+                    os.path.dirname(out), "plots", os.path.splitext(os.path.basename(out))[0]
+                )
+                for png in plot_run(summary, plot_dir):
+                    print(f"Plot written to {png}", flush=True)
+            except ImportError as e:  # matplotlib missing: metrics still saved
+                print(f"Skipping plots ({e}); run tools/plot_metrics.py later.", flush=True)
     print(f"Rank {dist.get_rank()}: Training finished")
     dist.destroy_process_group()
 
