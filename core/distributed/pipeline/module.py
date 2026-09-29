@@ -224,7 +224,6 @@ def training_step_1f1b(
 
     sync_grads(model, dp_group)
     optimizer.step()
-    print("Oi")
     if model.is_last_stage:
         print((accumulated_loss / num_microbatches).item())
         return (accumulated_loss / num_microbatches).item()
