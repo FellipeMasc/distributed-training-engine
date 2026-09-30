@@ -75,7 +75,9 @@ plt.rcParams.update(
 def run_label(summary: dict) -> str:
     p = summary["config"]["parallelism"]
     parts = [f"{k}{v}" for k, v in p.items() if v > 1]
-    return f"{summary['config']['world_size']} dev " + (" ".join(parts) if parts else "single")
+    layers = summary["config"].get("num_hidden_layers")
+    label = f"{summary['config']['world_size']} dev " + (" ".join(parts) if parts else "single")
+    return f"{label} L{layers}" if layers is not None else label
 
 
 def _fmt_bytes(b: float) -> str:
