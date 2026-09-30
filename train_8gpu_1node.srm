@@ -37,7 +37,7 @@ cd $SLURM_SUBMIT_DIR
 module load cuda/11.2_sequana
 
 #Ativa o venv criado no login node (mesmo diretorio do repo, em /scratch)
-source $SLURM_SUBMIT_DIR/tg/bin/activate
+source $SLURM_SUBMIT_DIR/distributed_training_engine/bin/activate
 echo "python: $(which python) ($(python --version 2>&1))"
 
 #Exibe as GPUs disponiveis em cada no
