@@ -47,6 +47,7 @@ echo "REPO_DIR:   $REPO_DIR"
 
 #Configura os Modulos
 module load cuda/11.2_sequana
+module load python/3.10.16_sequana
 
 #Ativa o venv criado no login node (pasta tg/ dentro do repo, em /scratch).
 #Sobrescreva com VENV=/caminho/para/venv sbatch ...
@@ -97,7 +98,9 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
-RUN_TAG="dp$((WORLD_SIZE / (TP * PP)))_tp${TP}_pp${PP}_seq${SEQ_LENGTH}_mbs${MICRO_BATCH_SIZE}_${DTYPE}"
+# Camadas efetivas: override ou o valor do checkpoint (para o nome do json/plots)
+LAYERS=${NUM_HIDDEN_LAYERS:-$($PYTHON -c "import json; print(json.load(open('hf_model_safetensors/config.json'))['num_hidden_layers'])" 2>/dev/null || echo NA)}
+RUN_TAG="dp$((WORLD_SIZE / (TP * PP)))_tp${TP}_pp${PP}_seq${SEQ_LENGTH}_mbs${MICRO_BATCH_SIZE}_layers${LAYERS}_${DTYPE}"
 mkdir -p benchmarks
 
 CMD="training/train.py \
