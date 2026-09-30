@@ -5,3 +5,4 @@ __pycache__/
 *dataset/data/*
 *DS_Store
 *tg
+*benchmarks
