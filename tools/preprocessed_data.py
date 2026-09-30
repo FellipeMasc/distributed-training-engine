@@ -213,8 +213,14 @@ def process_json_file(input_file_name, output_prefix, args, num_workers):
     vocab_size = tokenizer.vocab_size
     encoder = Encoder(args, tokenizer)
 
-    pool = multiprocessing.Pool(num_workers)
-    encoded_docs = pool.imap(encoder.encode, fin, 32)
+    # A single worker tokenizes inline: no process pool, so this path is safe
+    # to call from inside an already-running torchrun process.
+    pool = None
+    if num_workers > 1:
+        pool = multiprocessing.Pool(num_workers)
+        encoded_docs = pool.imap(encoder.encode, fin, 32)
+    else:
+        encoded_docs = map(encoder.encode, fin)
 
     output_idx_files = {}
     builders = {}
@@ -264,10 +270,53 @@ def process_json_file(input_file_name, output_prefix, args, num_workers):
         builders[key].finalize(output_idx_files[key])
 
     fin.close()
-    pool.close()
-    pool.join()
+    if pool is not None:
+        pool.close()
+        pool.join()
 
     print(f"Done. Processed {i} documents total.")
+
+
+def document_prefix(output_prefix, json_key):
+    """Path prefix (without .bin/.idx) that process_json_file writes for a key."""
+    return "{}_{}_{}".format(output_prefix, json_key, "document")
+
+
+def preprocess_jsonl(
+    input_path,
+    output_prefix,
+    seq_length,
+    json_keys=("text",),
+    append_eod=True,
+    workers=1,
+    eod_id=None,
+    pad_id=None,
+    trust_remote_code=False,
+    log_interval=1000,
+):
+    """Tokenize a JSONL file into .bin/.idx chunks of ``seq_length`` tokens.
+
+    Programmatic equivalent of the CLI (single partition). Returns the list of
+    document prefixes written, one per key in ``json_keys``, so callers can
+    open them with ``IndexedDataset``/``PackingDataset`` directly.
+    """
+    args = argparse.Namespace(
+        input=str(input_path),
+        output_prefix=str(output_prefix),
+        seq_length=int(seq_length),
+        json_keys=list(json_keys),
+        append_eod=append_eod,
+        workers=workers,
+        eod_id=eod_id,
+        pad_id=pad_id,
+        trust_remote_code=trust_remote_code,
+        log_interval=log_interval,
+        partitions=1,
+        keep_sequential_samples=False,
+    )
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_prefix)), exist_ok=True)
+    process_json_file(args.input, args.output_prefix, args, workers)
+    return [document_prefix(args.output_prefix, key) for key in args.json_keys]
 
 
 def _process_partition(name, args, num_workers, q):

@@ -4,3 +4,5 @@ __pycache__/
 *hf_model_safetensors*
 *dataset/data/*
 *DS_Store
+*tg
+*benchmarks
