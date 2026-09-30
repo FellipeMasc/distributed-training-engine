@@ -6,19 +6,15 @@ _DEVICE_MESH = None
 _DATA_PARALLEL_GROUP = None
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 _TENSOR_MODEL_PARALLEL_GROUP = None
-_CONTEXT_PARALLEL_GROUP = None
 _TP_DEGREE = None
 _PP_DEGREE = None
-_CP_DEGREE = None
 _DP_DEGREE = None
 
 
 @dataclass(frozen=True)
-class PipelineContextNeighborRanks:
+class PipelineNeighborRanks:
     pipeline_prev_rank: int | None
     pipeline_next_rank: int | None
-    context_prev_rank: int
-    context_next_rank: int
 
 
 def _infer_device_type() -> str:
@@ -29,30 +25,23 @@ def _infer_device_type() -> str:
 def initialize_parallel_state(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
-    context_parallel_size: int = 1,
     device_type: str | None = None,
 ) -> None:
     global _DEVICE_MESH
     global _DATA_PARALLEL_GROUP
     global _PIPELINE_MODEL_PARALLEL_GROUP
     global _TENSOR_MODEL_PARALLEL_GROUP
-    global _CONTEXT_PARALLEL_GROUP
     global _TP_DEGREE
     global _PP_DEGREE
-    global _CP_DEGREE
     global _DP_DEGREE
     global _DEVICE
 
     world_size = dist.get_world_size()
-    model_parallel_size = (
-        tensor_model_parallel_size
-        * pipeline_model_parallel_size
-        * context_parallel_size
-    )
+    model_parallel_size = tensor_model_parallel_size * pipeline_model_parallel_size
     if world_size % model_parallel_size != 0:
         raise ValueError(
             "World size must be divisible by "
-            f"TP*PP*CP ({model_parallel_size}). Got world_size={world_size}."
+            f"TP*PP ({model_parallel_size}). Got world_size={world_size}."
         )
     data_parallel_size = world_size // model_parallel_size
 
@@ -62,19 +51,16 @@ def initialize_parallel_state(
         mesh_shape=(
             data_parallel_size,
             pipeline_model_parallel_size,
-            context_parallel_size,
             tensor_model_parallel_size,
         ),
-        mesh_dim_names=("dp", "pp", "cp", "tp"),
+        mesh_dim_names=("dp", "pp", "tp"),
     )
 
     _DATA_PARALLEL_GROUP = _DEVICE_MESH.get_group("dp")
     _PIPELINE_MODEL_PARALLEL_GROUP = _DEVICE_MESH.get_group("pp")
-    _CONTEXT_PARALLEL_GROUP = _DEVICE_MESH.get_group("cp")
     _TENSOR_MODEL_PARALLEL_GROUP = _DEVICE_MESH.get_group("tp")
     _TP_DEGREE = tensor_model_parallel_size
     _PP_DEGREE = pipeline_model_parallel_size
-    _CP_DEGREE = context_parallel_size
     _DP_DEGREE = world_size // model_parallel_size
     _DEVICE = mesh_device_type
     
@@ -96,12 +82,6 @@ def get_pipeline_model_parallel_group():
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
 
-def get_context_parallel_group():
-    if _CONTEXT_PARALLEL_GROUP is None:
-        raise RuntimeError("Parallel state is not initialized.")
-    return _CONTEXT_PARALLEL_GROUP
-
-
 def get_tensor_model_parallel_group():
     if _TENSOR_MODEL_PARALLEL_GROUP is None:
         raise RuntimeError("Parallel state is not initialized.")
@@ -116,11 +96,6 @@ def get_pipeline_model_parallel_degree():
     if _PP_DEGREE is None:
         raise RuntimeError("Parallel state is not initialized.")
     return _PP_DEGREE
-
-def get_context_model_parallel_degree():
-    if _CP_DEGREE is None:
-        raise RuntimeError("Parallel state is not initialized.")
-    return _CP_DEGREE
 
 def get_data_parallel_degree():
     if _DP_DEGREE is None:
@@ -148,25 +123,11 @@ def get_pipeline_prev_next_ranks() -> tuple[int | None, int | None]:
     return prev_rank, next_rank
 
 
-def get_context_prev_next_ranks() -> tuple[int, int]:
-    cp_group = get_context_parallel_group()
-    cp_local_rank = dist.get_rank(group=cp_group)
-    cp_group_ranks = _get_group_global_ranks(cp_group)
-    cp_group_size = len(cp_group_ranks)
-
-    prev_rank = cp_group_ranks[(cp_local_rank - 1) % cp_group_size]
-    next_rank = cp_group_ranks[(cp_local_rank + 1) % cp_group_size]
-    return prev_rank, next_rank
-
-
-def get_pipeline_context_neighbor_ranks() -> PipelineContextNeighborRanks:
+def get_pipeline_neighbor_ranks() -> PipelineNeighborRanks:
     pp_prev_rank, pp_next_rank = get_pipeline_prev_next_ranks()
-    cp_prev_rank, cp_next_rank = get_context_prev_next_ranks()
-    return PipelineContextNeighborRanks(
+    return PipelineNeighborRanks(
         pipeline_prev_rank=pp_prev_rank,
         pipeline_next_rank=pp_next_rank,
-        context_prev_rank=cp_prev_rank,
-        context_next_rank=cp_next_rank,
     )
 
 def get_device():

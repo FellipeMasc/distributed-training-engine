@@ -12,7 +12,7 @@ tokens/sec
     Global tokens consumed per optimizer step divided by the step wall time,
     averaged over the steps after ``warmup_steps``. Global tokens per step is
     ``micro_batch_size * seq_length * dp_size`` since every data-parallel
-    replica sees a different batch while tp/pp/cp ranks share one.
+    replica sees a different batch while tp/pp ranks share one.
 peak memory
     ``torch.cuda.max_memory_allocated`` / ``max_memory_reserved`` per rank on
     CUDA; the process RSS high-water mark otherwise. The summary keeps the
@@ -261,7 +261,7 @@ def format_summary(summary: dict) -> str:
     lines = [
         "=" * 64,
         f"Benchmark summary  (world_size={cfg['world_size']}, dp={p['dp']} tp={p['tp']} "
-        f"pp={p['pp']} cp={p['cp']}, dtype={cfg['dtype']}, layers={cfg['num_hidden_layers']})",
+        f"pp={p['pp']}, dtype={cfg['dtype']}, layers={cfg['num_hidden_layers']})",
         "-" * 64,
         f"tokens/step (global)     : {cfg['tokens_per_step']:,}",
         f"timed steps              : {thr['timed_steps']} (after {thr['warmup_steps']} warmup)",

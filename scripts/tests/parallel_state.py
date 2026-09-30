@@ -11,7 +11,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from distributed_training_engine.core.parallel_state import (
-    get_context_parallel_group,
     get_data_parallel_group,
     get_device_mesh,
     get_pipeline_model_parallel_group,
@@ -28,7 +27,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--tp", type=int, default=2, help="Tensor parallel size")
     parser.add_argument("--pp", type=int, default=2, help="Pipeline parallel size")
-    parser.add_argument("--cp", type=int, default=2, help="Context parallel size")
     parser.add_argument(
         "--backend",
         type=str,
@@ -63,29 +61,25 @@ def main() -> None:
         initialize_parallel_state(
             tensor_model_parallel_size=args.tp,
             pipeline_model_parallel_size=args.pp,
-            context_parallel_size=args.cp,
             device_type=args.device_type,
         )
 
         mesh = get_device_mesh()
         tp_group = get_tensor_model_parallel_group()
         pp_group = get_pipeline_model_parallel_group()
-        cp_group = get_context_parallel_group()
         dp_group = get_data_parallel_group()
 
         dp_rank = mesh.get_local_rank("dp")
         pp_rank = mesh.get_local_rank("pp")
-        cp_rank = mesh.get_local_rank("cp")
         tp_rank = mesh.get_local_rank("tp")
 
         tp_world_size = dist.get_world_size(group=tp_group)
         pp_world_size = dist.get_world_size(group=pp_group)
-        cp_world_size = dist.get_world_size(group=cp_group)
         dp_world_size = dist.get_world_size(group=dp_group)
 
         print(
-            f"[rank={rank}] coords(dp={dp_rank}, pp={pp_rank}, cp={cp_rank}, tp={tp_rank}) "
-            f"group_sizes(dp={dp_world_size}, pp={pp_world_size}, cp={cp_world_size}, tp={tp_world_size})",
+            f"[rank={rank}] coords(dp={dp_rank}, pp={pp_rank}, tp={tp_rank}) "
+            f"group_sizes(dp={dp_world_size}, pp={pp_world_size}, tp={tp_world_size})",
             flush=True,
         )
 

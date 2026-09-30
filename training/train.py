@@ -73,7 +73,6 @@ def parser_args():
     parser.add_argument("--dp", type=int, default=None, help="Data parallel degree.")
     parser.add_argument("--pp", type=int, default=1, help="Pipeline parallel degree.")
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallel degree.")
-    parser.add_argument("--cp", type=int, default=1, help="Context parallel degree.")
     parser.add_argument("--micro-batch-size", type=int, default=4, help="Per-rank micro batch size.")
     parser.add_argument(
         "--num-microbatches",
@@ -143,7 +142,7 @@ def parser_args():
         default=None,
         help=(
             "Where to write the JSON benchmark summary. Defaults to "
-            "benchmarks/<dp,tp,pp,cp,seq,mbs,dtype>.json under the project root."
+            "benchmarks/<dp,tp,pp,seq,mbs,dtype>.json under the project root."
         ),
     )
     parser.add_argument(
@@ -349,43 +348,31 @@ def train():
     model_dtype = DTYPE_MAP[args.dtype]
 
     world_size = dist.get_world_size()
-    model_parallel_size = args.tp * args.pp * args.cp
+    model_parallel_size = args.tp * args.pp
     if world_size % model_parallel_size != 0:
         raise ValueError(
-            f"world_size={world_size} must be divisible by tp*pp*cp={model_parallel_size}."
+            f"world_size={world_size} must be divisible by tp*pp={model_parallel_size}."
         )
     inferred_dp = world_size // model_parallel_size
     if args.dp is not None and args.dp != inferred_dp:
         raise ValueError(
             f"Requested dp={args.dp}, but inferred dp={inferred_dp} from "
-            f"world_size={world_size} and tp/pp/cp=({args.tp}/{args.pp}/{args.cp})."
+            f"world_size={world_size} and tp/pp=({args.tp}/{args.pp})."
         )
 
     initialize_parallel_state(
         tensor_model_parallel_size=args.tp,
         pipeline_model_parallel_size=args.pp,
-        context_parallel_size=args.cp,
     )
 
     comm_groups_config = CommGroupsConfig()
     local_rank = comm_groups_config.local_rank
     dp_group = comm_groups_config.dp_group
     pp_group = comm_groups_config.pp_group
-    cp_group = comm_groups_config.cp_group
     tp_group = comm_groups_config.tp_group
     dp_rank = dist.get_rank(group=dp_group)
     dp_size = dist.get_world_size(group=dp_group)
 
-    #debug 
-    # list_dp_group = _get_group_global_ranks(dp_group)
-    # list_pp_group = _get_group_global_ranks(pp_group)
-    # list_cp_group = _get_group_global_ranks(cp_group)
-    # list_tp_group = _get_group_global_ranks(tp_group)
-    # print(f"RANK {comm_groups_config.local_rank}: dp_group: {list_dp_group}")
-    # print(f"RANK {comm_groups_config.local_rank}: pp_group: {list_pp_group}")
-    # print(f"RANK {comm_groups_config.local_rank}: cp_group: {list_cp_group}")
-    # print(f"RANK {comm_groups_config.local_rank}: tp_group: {list_tp_group}")
-    
     use_cuda = torch.cuda.is_available()
     if use_cuda:
         torch.cuda.set_device(local_rank)
@@ -444,7 +431,7 @@ def train():
 
     print(
         f"Rank {dist.get_rank()}: Training "
-        f"(dp={inferred_dp}, pp={args.pp}, tp={args.tp}, cp={args.cp}, "
+        f"(dp={inferred_dp}, pp={args.pp}, tp={args.tp}"
         f"num_microbatches={num_microbatches if use_pipeline else 1}, "
         f"dtype={model_dtype}, device={device})"
     )
@@ -459,7 +446,6 @@ def train():
         comm_groups_config.is_last_stage
         and dp_rank == 0
         and dist.get_rank(group=tp_group) == 0
-        and dist.get_rank(group=cp_group) == 0
     )
     metrics = TrainingMetrics(
         tokens_per_step=args.micro_batch_size * args.seq_length * dp_size,
@@ -475,7 +461,7 @@ def train():
             "dtype": args.dtype,
             "backend": backend,
             "device": device.type,
-            "parallelism": {"dp": inferred_dp, "tp": args.tp, "pp": args.pp, "cp": args.cp},
+            "parallelism": {"dp": inferred_dp, "tp": args.tp, "pp": args.pp,},
             "max_steps": args.max_steps,
         },
     )
@@ -511,7 +497,7 @@ def train():
             PROJECT_ROOT
             / "benchmarks"
             / (
-                f"dp{inferred_dp}_tp{args.tp}_pp{args.pp}_cp{args.cp}"
+                f"dp{inferred_dp}_tp{args.tp}_pp{args.pp}"
                 f"_seq{args.seq_length}_mbs{args.micro_batch_size}_{args.dtype}.json"
             )
         )
