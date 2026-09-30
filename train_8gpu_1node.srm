@@ -3,7 +3,8 @@
 #SBATCH --ntasks-per-node=1        #Um torchrun por no; ele abre 1 processo por GPU
 #SBATCH --gpus-per-node=8          #8x V100 no mesmo no
 #SBATCH --cpus-per-task=32         #Ajuste se o no reclamar (nproc no sdumont4000)
-#SBATCH --exclusive                #No inteiro (evita co-tenants nas GPUs)
+# (sem --exclusive: em varios Slurm ele entrega TODAS as GPUs do no e ignora
+#  --gpus-per-node; para o no inteiro basta --gpus-per-node=8)
 #SBATCH -p gdl                     #Unica fila com gpu:v100:8 (1 no -> pode ficar pendente)
 #SBATCH --time=01:00:00            #Fila gdl e "infinite"; limite explicito por seguranca
 #SBATCH -J dte_train_8gpu_1node    #Nome do job
@@ -14,7 +15,7 @@
 # Parametros do treino (sobrescreva via env: TP=2 PP=2 sbatch train_8gpu.srm)
 # world_size = 8 e o script infere dp = 8 / (tp * pp).
 # ---------------------------------------------------------------------------
-DP=${DP:-2}
+DP=${DP:-}   # opcional; o engine infere dp = world_size/(tp*pp). So passe para validar.
 TP=${TP:-2}
 PP=${PP:-2}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-4}
@@ -73,7 +74,9 @@ detect_gpus_per_node() {
   if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then echo "$CUDA_VISIBLE_DEVICES" | tr ',' ' ' | wc -w | tr -d ' '; return; fi
   srun --ntasks=1 --nodes=1 nvidia-smi -L 2>/dev/null | grep -c '^GPU'
 }
+echo "slurm gpu vars: SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-} SLURM_GPUS_PER_NODE=${SLURM_GPUS_PER_NODE:-} SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 GPUS_PER_NODE=${GPUS_PER_NODE:-$(detect_gpus_per_node)}
+echo "GPUS_PER_NODE=$GPUS_PER_NODE"
 if ! [ "$GPUS_PER_NODE" -ge 1 ] 2>/dev/null; then
   echo "ERRO: nao consegui detectar GPUs na alocacao (GPUS_PER_NODE='$GPUS_PER_NODE')." >&2
   exit 2
@@ -97,7 +100,7 @@ RUN_TAG="dp$((WORLD_SIZE / (TP * PP)))_tp${TP}_pp${PP}_seq${SEQ_LENGTH}_mbs${MIC
 mkdir -p benchmarks
 
 CMD="training/train.py \
-  --dp $DP \
+  ${DP:+--dp $DP} \
   --tp $TP \
   --pp $PP \
   --micro-batch-size $MICRO_BATCH_SIZE \
