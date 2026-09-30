@@ -20,6 +20,7 @@ TP=${TP:-2}
 PP=${PP:-2}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-4}
 SEQ_LENGTH=${SEQ_LENGTH:-512}
+NUM_HIDDEN_LAYERS=${NUM_HIDDEN_LAYERS:-}   # opcional; vazio = usa num_hidden_layers do checkpoint
 MAX_STEPS=${MAX_STEPS:-20}
 WARMUP_STEPS=${WARMUP_STEPS:-2}
 # V100 nao tem bf16 nativo e fp16 puro gera NaN neste engine; fp32 e o seguro.
@@ -107,6 +108,7 @@ CMD="training/train.py \
   --seq-length $SEQ_LENGTH \
   --max-steps $MAX_STEPS \
   --warmup-steps $WARMUP_STEPS \
+  ${NUM_HIDDEN_LAYERS:+--num-hidden-layers $NUM_HIDDEN_LAYERS} \
   --dtype $DTYPE \
   --backend nccl \
   --metrics-out benchmarks/${RUN_TAG}_job${SLURM_JOB_ID}.json \
