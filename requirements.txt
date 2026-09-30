@@ -6,3 +6,4 @@ huggingface_hub==1.15.0
 datasets==4.8.5
 numpy==2.4.4
 sympy==1.14.0
+matplotlib==3.10.0

@@ -1,0 +1,97 @@
+#!/bin/bash
+#SBATCH --nodes=1                  #Um unico no com 8 GPUs (sdumont4000)
+#SBATCH --ntasks-per-node=1        #Um torchrun por no; ele abre 1 processo por GPU
+#SBATCH --gpus-per-node=8          #8x V100 no mesmo no
+#SBATCH --cpus-per-task=32         #Ajuste se o no reclamar (nproc no sdumont4000)
+#SBATCH --exclusive                #No inteiro (evita co-tenants nas GPUs)
+#SBATCH -p gdl                     #Unica fila com gpu:v100:8 (1 no -> pode ficar pendente)
+#SBATCH --time=01:00:00            #Fila gdl e "infinite"; limite explicito por seguranca
+#SBATCH -J dte_train_8gpu_1node    #Nome do job
+#SBATCH -o slurm-%j.out            #stdout+stderr no diretorio de submissao
+#SBATCH -e slurm-%j.out
+
+# ---------------------------------------------------------------------------
+# Parametros do treino (sobrescreva via env: TP=2 PP=2 sbatch train_8gpu.srm)
+# world_size = 8 e o script infere dp = 8 / (tp * pp).
+# ---------------------------------------------------------------------------
+TP=${TP:-1}
+PP=${PP:-4}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-4}
+SEQ_LENGTH=${SEQ_LENGTH:-512}
+MAX_STEPS=${MAX_STEPS:-20}
+WARMUP_STEPS=${WARMUP_STEPS:-2}
+# V100 nao tem bf16 nativo e fp16 puro gera NaN neste engine; fp32 e o seguro.
+DTYPE=${DTYPE:-fp32}
+EXTRA_ARGS=${EXTRA_ARGS:-}
+
+echo "========================"
+echo "START TIME: $(date)"
+echo "JOB ID:     $SLURM_JOB_ID"
+echo "NODELIST:   $SLURM_JOB_NODELIST"
+nodeset -e $SLURM_JOB_NODELIST
+echo "========================"
+
+cd $SLURM_SUBMIT_DIR
+
+#Configura os Modulos
+module load cuda/11.2_sequana
+
+#Ativa o venv criado no login node (mesmo diretorio do repo, em /scratch)
+source $SLURM_SUBMIT_DIR/tg/bin/activate
+echo "python: $(which python) ($(python --version 2>&1))"
+
+#Exibe as GPUs disponiveis em cada no
+srun --ntasks-per-node=1 bash -c 'echo "== $(hostname) =="; nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv'
+
+# ---------------------------------------------------------------------------
+# Rendezvous do torchrun: no unico, master = o proprio no.
+# ---------------------------------------------------------------------------
+export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+export MASTER_PORT=$((10000 + SLURM_JOB_ID % 20000))
+GPUS_PER_NODE=${SLURM_GPUS_ON_NODE:-8}
+NNODES=$SLURM_JOB_NUM_NODES
+WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
+echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT WORLD_SIZE=$WORLD_SIZE"
+
+# Nos de computacao do SDumont nao tem internet: modelo e dataset ja devem
+# estar em hf_model_safetensors/ e dataset/data/ (baixados no login node).
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HOME=$SLURM_SUBMIT_DIR/.cache/huggingface
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=$(( ${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-8}} / GPUS_PER_NODE ))
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+RUN_TAG="dp$((WORLD_SIZE / (TP * PP)))_tp${TP}_pp${PP}_seq${SEQ_LENGTH}_mbs${MICRO_BATCH_SIZE}_${DTYPE}"
+mkdir -p benchmarks
+
+CMD="training/train.py \
+  --tp $TP \
+  --pp $PP \
+  --micro-batch-size $MICRO_BATCH_SIZE \
+  --seq-length $SEQ_LENGTH \
+  --max-steps $MAX_STEPS \
+  --warmup-steps $WARMUP_STEPS \
+  --dtype $DTYPE \
+  --backend nccl \
+  --metrics-out benchmarks/${RUN_TAG}_job${SLURM_JOB_ID}.json \
+  $EXTRA_ARGS"
+
+LAUNCHER="torchrun \
+  --nnodes=$NNODES \
+  --nproc_per_node=$GPUS_PER_NODE \
+  --rdzv_id=$SLURM_JOB_ID \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+  --max_restarts=0 \
+  --tee 3"
+
+echo "Running: $LAUNCHER $CMD"
+srun --ntasks-per-node=1 --kill-on-bad-exit=1 $LAUNCHER $CMD
+exit_status=$?
+
+echo "========================"
+echo "END TIME: $(date)  exit=$exit_status"
+exit $exit_status
