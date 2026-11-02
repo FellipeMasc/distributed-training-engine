@@ -1,0 +1,17 @@
+# Python 3.10 variant of requirements.txt (para o conda env no Santos Dumont).
+# Unica diferenca de versao: numpy 2.4.x exige Python >= 3.11, entao fica em 2.2.6.
+#
+# GPUs V100 (Volta, sm_70): use o wheel cu126 do PyTorch. CUDA 13 nao suporta Volta
+# e o build cu128 tambem deixou o sm_70 de fora. Instale com:
+#   pip install --index-url https://download.pytorch.org/whl/cu126 torch==2.11.0
+#   pip install -r requirements-py310.txt
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.11.0
+transformers==5.9.0
+accelerate==1.13.0
+safetensors==0.7.0
+huggingface_hub==1.15.0
+datasets==4.8.5
+numpy==2.2.6
+sympy==1.14.0
+matplotlib==3.10.0
