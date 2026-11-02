@@ -22,6 +22,7 @@ MAX_STEPS=${MAX_STEPS:-20}
 WARMUP_STEPS=${WARMUP_STEPS:-2}
 # V100 nao tem bf16 nativo e fp16 puro gera NaN neste engine; fp32 e o seguro.
 DTYPE=${DTYPE:-fp32}
+NUM_HIDDEN_LAYERS=${NUM_HIDDEN_LAYERS:-}   # opcional; vazio = usa num_hidden_layers do checkpoint
 EXTRA_ARGS=${EXTRA_ARGS:-}
 
 # Este arquivo deve ser submetido com `sbatch`, nunca executado direto.
@@ -45,25 +46,46 @@ echo "REPO_DIR:   $REPO_DIR"
 #Configura os Modulos
 module load cuda/11.2_sequana
 
-#Ativa o venv criado no login node (pasta tg/ dentro do repo, em /scratch).
-#Sobrescreva com VENV=/caminho/para/venv sbatch ...
-VENV=${VENV:-$REPO_DIR/tg}
-if [ ! -f "$VENV/bin/activate" ]; then
-  echo "ERRO: venv nao encontrado em $VENV (crie com: python -m venv $VENV && pip install -r requirements.txt)" >&2
+#Ambiente Python criado no login node: venv OU conda env (qualquer pasta com bin/python).
+#Padrao: $SCRATCH/conda/envs/tg. Sobrescreva com VENV=/caminho/para/env sbatch ...
+VENV=${VENV:-$SCRATCH/conda/envs/tg}
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "ERRO: ambiente nao encontrado em $VENV (sem bin/python). Veja requirements-py310.txt." >&2
   exit 2
 fi
-source "$VENV/bin/activate"
-echo "python: $(which python) ($(python --version 2>&1))"
+export PATH="$VENV/bin:$PATH"
+PYTHON="$VENV/bin/python"
+echo "python: $PYTHON ($($PYTHON --version 2>&1))"
+# Falha cedo se o torch nao estiver instalado ou for build sem CUDA
+$PYTHON -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())" || {
+  echo "ERRO: torch nao importa dentro de $VENV. Rode no login node: pip install -r requirements.txt" >&2
+  exit 2
+}
 
 #Exibe as GPUs disponiveis em cada no
-srun --ntasks-per-node=1 bash -c 'echo "== $(hostname) =="; nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv'
+srun --ntasks-per-node=1 bash -c 'echo "== $(hostname) =="; nvidia-smi --query-gpu=index,name,driver_version,memory.used,memory.total --format=csv'
 
 # ---------------------------------------------------------------------------
 # Rendezvous do torchrun: o primeiro no da lista e o master.
 # ---------------------------------------------------------------------------
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=$((10000 + SLURM_JOB_ID % 20000))
-GPUS_PER_NODE=4
+# GPUs por no: conta o que o Slurm realmente alocou (nem toda versao exporta
+# SLURM_GPUS_ON_NODE). Ordem: SLURM_GPUS_ON_NODE -> SLURM_GPUS_PER_NODE ("8" ou
+# "v100:8") -> CUDA_VISIBLE_DEVICES -> nvidia-smi -L. Sobrescreva com GPUS_PER_NODE=N.
+detect_gpus_per_node() {
+  if [ -n "${SLURM_GPUS_ON_NODE:-}" ]; then echo "$SLURM_GPUS_ON_NODE"; return; fi
+  if [ -n "${SLURM_GPUS_PER_NODE:-}" ]; then echo "${SLURM_GPUS_PER_NODE##*:}"; return; fi
+  if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then echo "$CUDA_VISIBLE_DEVICES" | tr ',' ' ' | wc -w | tr -d ' '; return; fi
+  srun --ntasks=1 --nodes=1 nvidia-smi -L 2>/dev/null | grep -c '^GPU'
+}
+echo "slurm gpu vars: SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-} SLURM_GPUS_PER_NODE=${SLURM_GPUS_PER_NODE:-} SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
+GPUS_PER_NODE=${GPUS_PER_NODE:-$(detect_gpus_per_node)}
+echo "GPUS_PER_NODE=$GPUS_PER_NODE"
+if ! [ "$GPUS_PER_NODE" -ge 1 ] 2>/dev/null; then
+  echo "ERRO: nao consegui detectar GPUs na alocacao (GPUS_PER_NODE='$GPUS_PER_NODE')." >&2
+  exit 2
+fi
 NNODES=$SLURM_JOB_NUM_NODES
 WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
 echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT WORLD_SIZE=$WORLD_SIZE"
@@ -79,7 +101,9 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
-RUN_TAG="dp$((WORLD_SIZE / (TP * PP)))_tp${TP}_pp${PP}_seq${SEQ_LENGTH}_mbs${MICRO_BATCH_SIZE}_${DTYPE}"
+# Camadas efetivas: override ou o valor do checkpoint (para o nome do json/plots)
+LAYERS=${NUM_HIDDEN_LAYERS:-$($PYTHON -c "import json; print(json.load(open('hf_model_safetensors/config.json'))['num_hidden_layers'])" 2>/dev/null || echo NA)}
+RUN_TAG="dp$((WORLD_SIZE / (TP * PP)))_tp${TP}_pp${PP}_seq${SEQ_LENGTH}_mbs${MICRO_BATCH_SIZE}_layers${LAYERS}_${DTYPE}"
 mkdir -p benchmarks
 
 CMD="training/train.py \
@@ -89,12 +113,13 @@ CMD="training/train.py \
   --seq-length $SEQ_LENGTH \
   --max-steps $MAX_STEPS \
   --warmup-steps $WARMUP_STEPS \
+  ${NUM_HIDDEN_LAYERS:+--num-hidden-layers $NUM_HIDDEN_LAYERS} \
   --dtype $DTYPE \
   --backend nccl \
   --metrics-out benchmarks/${RUN_TAG}_job${SLURM_JOB_ID}.json \
   $EXTRA_ARGS"
 
-LAUNCHER="torchrun \
+LAUNCHER="$PYTHON -m torch.distributed.run \
   --nnodes=$NNODES \
   --nproc_per_node=$GPUS_PER_NODE \
   --rdzv_id=$SLURM_JOB_ID \

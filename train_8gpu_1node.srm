@@ -11,6 +11,9 @@
 #SBATCH -o slurm-%j.out            #stdout+stderr no diretorio de submissao
 #SBATCH -e slurm-%j.out
 
+
+
+#NUM_HIDDEN_LAYERS=4 sbatch --gpus-per-node=1 train_8gpu_1node.srm
 # ---------------------------------------------------------------------------
 # Parametros do treino (sobrescreva via env: TP=2 PP=2 sbatch train_8gpu.srm)
 # world_size = 8 e o script infere dp = 8 / (tp * pp).
