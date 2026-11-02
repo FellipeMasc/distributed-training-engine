@@ -17,9 +17,9 @@ so the checkpoint loader just needs to copy the matching slice into it.
 
 Placement of the `f`/`g` operators (see comm.py):
     - ColumnParallelLinear applies `f` (copy_to_tensor_parallel_region) to its
-      input, then optionally gathers its output.
-    - RowParallelLinear optionally scatters its input, then applies `g`
-      (reduce_from_tensor_parallel_region) to its output.
+      input and returns its local output shard.
+    - RowParallelLinear applies `g` (reduce_from_tensor_parallel_region) to
+      its output; its input is already sharded by the preceding column layer.
     - VocabParallelEmbedding applies `g` to its output.
 """
 
@@ -32,9 +32,7 @@ import torch.nn.functional as F
 
 from core.distributed.tensor.comm import (
     copy_to_tensor_parallel_region,
-    gather_from_tensor_parallel_region,
     reduce_from_tensor_parallel_region,
-    scatter_to_tensor_parallel_region,
 )
 
 from core.process_groups_config import CommGroupsConfig
@@ -58,9 +56,6 @@ class ColumnParallelLinear(nn.Module):
         in_features: full input dimension (same on every rank).
         out_features: full output dimension (split across ranks).
         bias: whether to learn an additive bias (also split along dim 0).
-        gather_output: if True, all-gather the output so every rank returns the
-            full `[..., out_features]` tensor; if False, return the local shard
-            (typical when the next layer is row-parallel).
         dtype: passed through to parameter allocation (becomes `meta` when
             building under `init_empty_weights`).
         name: label used in `extra_repr` only.
@@ -71,7 +66,6 @@ class ColumnParallelLinear(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        gather_output: bool = False,
         dtype=None,
         name: str = None,
     ) -> None:
@@ -79,7 +73,6 @@ class ColumnParallelLinear(nn.Module):
         self.comm_groups_config = CommGroupsConfig()
         self.in_features = in_features
         self.out_features = out_features
-        self.gather_output = gather_output
         self.tp_group = self.comm_groups_config.tp_group
         self.tp_size = self.comm_groups_config.tp_degree
         self.tp_rank = self.comm_groups_config.tp_rank
@@ -97,19 +90,14 @@ class ColumnParallelLinear(nn.Module):
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         input_parallel = copy_to_tensor_parallel_region(input_, self.tp_group)
-        output_parallel = F.linear(input_parallel, self.weight, self.bias)
-        if self.gather_output:
-            output = gather_from_tensor_parallel_region(output_parallel, self.tp_group)
-        else:
-            output = output_parallel
-        return output
+        return F.linear(input_parallel, self.weight, self.bias)
 
     def extra_repr(self) -> str:
         return (
             f"name={self.name}, in_features={self.in_features}, "
             f"out_features={self.out_features}, "
             f"out_per_partition={self.output_size_per_partition}, "
-            f"tp_size={self.tp_size}, gather_output={self.gather_output}"
+            f"tp_size={self.tp_size}"
         )
 
 class RowParallelLinear(nn.Module):
@@ -123,9 +111,6 @@ class RowParallelLinear(nn.Module):
         out_features: full output dimension (same on every rank).
         bias: whether to learn an additive bias (NOT split; added once after
             the all-reduce).
-        input_is_parallel: if True, the input is already sharded along its last
-            dim (e.g. it came from a column-parallel layer); if False, scatter
-            it first.
         dtype: passed through to parameter allocation.
         name: label used in `extra_repr` only.
     """
@@ -135,7 +120,6 @@ class RowParallelLinear(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        input_is_parallel: bool = True,
         dtype=None,
         name: str = None,
     ) -> None:
@@ -143,10 +127,8 @@ class RowParallelLinear(nn.Module):
         self.comm_groups_config = CommGroupsConfig()
         self.in_features = in_features
         self.out_features = out_features
-        self.input_is_parallel = input_is_parallel
         self.tp_group = self.comm_groups_config.tp_group
         self.tp_size = self.comm_groups_config.tp_degree
-        self.tp_rank = self.comm_groups_config.tp_rank
         self.name = name
         self.input_size_per_partition = _divide(in_features, self.tp_size)
 
@@ -157,12 +139,8 @@ class RowParallelLinear(nn.Module):
             self.register_parameter('bias', None)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            input_parallel = scatter_to_tensor_parallel_region(input_, self.tp_group)
         # The bias is replicated, so add it once *after* the all-reduce.
-        output_parallel = F.linear(input_parallel, self.weight)
+        output_parallel = F.linear(input_, self.weight)
         output = reduce_from_tensor_parallel_region(output_parallel, self.tp_group)
         if self.bias is not None:
             output = output + self.bias
@@ -198,7 +176,6 @@ class VocabParallelEmbedding(nn.Module):
         num_embeddings: int,
         embedding_dim: int,
         tp_group: dist.ProcessGroup | None = None,
-        device=None,
         dtype=None,
     ) -> None:
         super().__init__()
@@ -217,7 +194,7 @@ class VocabParallelEmbedding(nn.Module):
             torch.empty(
                 self.num_embeddings_per_partition,
                 embedding_dim,
-                device=device if device is not None else self.comm_groups_config.device,
+                device=self.comm_groups_config.device,
                 dtype=dtype,
             )
         )

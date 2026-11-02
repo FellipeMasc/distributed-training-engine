@@ -410,9 +410,6 @@ def train():
         dtype=model_dtype,
     )
 
-    # Data-parallel gradient averaging is done manually inside the step
-    # functions (see core/distributed/data/comm.py) rather than via DDP, since
-    # the custom 1F1B schedule drives backward itself.
     data_prefix = ensure_preprocessed_data(
         args.seq_length,
         local_rank,

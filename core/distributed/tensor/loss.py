@@ -1,6 +1,6 @@
 """Vocab-parallel cross-entropy (Megatron-LM style).
 
-When ``lm_head`` is a ``ColumnParallelLinear`` with ``gather_output=False``,
+When ``lm_head`` is a ``ColumnParallelLinear``,
 each tensor-parallel rank holds logits for only its slice of the vocabulary:
 ``[..., vocab_size // tp_size]``. Computing the loss directly on those shards
 avoids materializing the full ``[B, S, vocab_size]`` logits on every rank.
