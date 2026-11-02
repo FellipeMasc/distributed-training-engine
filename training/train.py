@@ -142,7 +142,7 @@ def parser_args():
         default=None,
         help=(
             "Where to write the JSON benchmark summary. Defaults to "
-            "benchmarks/<dp,tp,pp,seq,mbs,dtype>.json under the project root."
+            "benchmarks/<dp,tp,pp,seq,mbs,layers,dtype>.json under the project root."
         ),
     )
     parser.add_argument(
@@ -498,7 +498,8 @@ def train():
             / "benchmarks"
             / (
                 f"dp{inferred_dp}_tp{args.tp}_pp{args.pp}"
-                f"_seq{args.seq_length}_mbs{args.micro_batch_size}_{args.dtype}.json"
+                f"_seq{args.seq_length}_mbs{args.micro_batch_size}"
+                f"_layers{model_config.num_hidden_layers}_{args.dtype}.json"
             )
         )
         write_summary(summary, out)
