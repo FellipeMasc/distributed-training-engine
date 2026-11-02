@@ -252,7 +252,7 @@ def causal_lm_loss(
     from transformers.loss.loss_utils import ForCausalLMLoss
 
     logits = lm_head(hidden_states)
-    if isinstance(lm_head, ColumnParallelLinear) and not lm_head.gather_output and lm_head.tp_size > 1:
+    if isinstance(lm_head, ColumnParallelLinear) and lm_head.tp_size > 1:
         return vocab_parallel_cross_entropy(
             logits,
             labels,

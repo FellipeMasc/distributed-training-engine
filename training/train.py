@@ -410,9 +410,6 @@ def train():
         dtype=model_dtype,
     )
 
-    # Data-parallel gradient averaging is done manually inside the step
-    # functions (see core/distributed/data/comm.py) rather than via DDP, since
-    # the custom 1F1B schedule drives backward itself.
     data_prefix = ensure_preprocessed_data(
         args.seq_length,
         local_rank,
@@ -522,28 +519,3 @@ def train():
 
 if __name__ == "__main__":
     train()
-
-# model.train()
-#     step = 0
-#     while step < args.max_steps:
-#         for batch in dataloader:
-#             tokens = batch["tokens"].to(device)
-#             labels = batch["labels"].to(device)
-#             position_ids = batch["position_ids"].to(device)
-
-#             outputs = model(input_ids=tokens, position_ids=position_ids)
-#             if args.conversation:
-#                 loss_mask = batch["loss_mask"].to(device)
-#                 loss = masked_cross_entropy(outputs.logits, labels, loss_mask)
-#             else:
-#                 loss = ForCausalLMLoss(outputs.logits,labels,model_config.vocab_size,shift_labels=labels)
-
-#             optimizer.zero_grad(set_to_none=True)
-#             loss.backward()
-#             optimizer.step()
-
-#             step += 1
-#             if dist.get_rank() == 0:
-#                 print(f"step {step}/{args.max_steps} | loss {loss.item():.4f}")
-#             if step >= args.max_steps:
-#                 break

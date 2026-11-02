@@ -16,6 +16,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by Fellipe Oliveira, 2026, for a bachelor thesis on distributed
+# training. Adapted from transformers/models/llama/modeling_llama.py:
+# removed causal mask construction and KV-cache offset for position_ids,
+# added lm_head to LlamaModel, added shape comments in LlamaAttention.
 from collections.abc import Callable
 from typing import Optional
 

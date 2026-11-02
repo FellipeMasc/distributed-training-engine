@@ -17,7 +17,7 @@ Llama → tensor-parallel mapping (per Megatron's attention/MLP partitioning):
         gate_proj/up_proj            fused into one ColumnParallelLinear
                                      `gate_up_proj` (Megatron's `linear_fc1`)
         down_proj                    RowParallelLinear (input already parallel)
-    lm_head                      -> ColumnParallelLinear (gather_output=False)
+    lm_head                      -> ColumnParallelLinear
                                     + vocab-parallel cross-entropy (see loss.py)
 
 Fusing q/k/v (and gate/up) matters for communication, not just GEMM size:
@@ -92,7 +92,7 @@ def TensorParallelModule(
         layer.mlp = TensorParallelMLP(layer.mlp, model_config)
 
     if getattr(model, "lm_head", None) is not None:
-        _replace_column_linear(model, "lm_head", gather_output=False)
+        _replace_column_linear(model, "lm_head")
 
     return model
 
@@ -131,7 +131,6 @@ class TensorParallelAttention(nn.Module):
             in_features=config.hidden_size,
             out_features=q_out + 2 * kv_out,
             bias=bias,
-            gather_output=False,
             dtype=dtype,
             name="qkv_proj",
         )
@@ -143,7 +142,6 @@ class TensorParallelAttention(nn.Module):
             in_features=q_out,
             out_features=config.hidden_size,
             bias=attn.o_proj.bias is not None,
-            input_is_parallel=True,
             dtype=attn.o_proj.weight.dtype,
             name="o_proj",
         )
@@ -215,7 +213,6 @@ class TensorParallelMLP(nn.Module):
             in_features=self.hidden_size,
             out_features=2 * self.intermediate_size,
             bias=mlp.gate_proj.bias is not None,
-            gather_output=False,
             dtype=mlp.gate_proj.weight.dtype,
             name="gate_up_proj",
         )
@@ -223,7 +220,6 @@ class TensorParallelMLP(nn.Module):
             in_features=self.intermediate_size,
             out_features=self.hidden_size,
             bias=mlp.down_proj.bias is not None,
-            input_is_parallel=True,
             dtype=mlp.down_proj.weight.dtype,
             name="down_proj",
         )
@@ -239,36 +235,13 @@ class TensorParallelMLP(nn.Module):
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _replace_column_linear(
-    parent: nn.Module,
-    attr: str,
-    gather_output: bool = False,
-) -> None:
+def _replace_column_linear(parent: nn.Module, attr: str) -> None:
     """Replace `parent.<attr>` (an nn.Linear) with a ColumnParallelLinear."""
     old: nn.Linear = getattr(parent, attr)
     new = ColumnParallelLinear(
         in_features=old.in_features,
         out_features=old.out_features,
         bias=old.bias is not None,
-        gather_output=gather_output,
-        dtype=old.weight.dtype,
-        name=attr,
-    )
-    setattr(parent, attr, new)
-
-
-def _replace_row_linear(
-    parent: nn.Module,
-    attr: str,
-    input_is_parallel: bool = True,
-) -> None:
-    """Replace `parent.<attr>` (an nn.Linear) with a RowParallelLinear."""
-    old: nn.Linear = getattr(parent, attr)
-    new = RowParallelLinear(
-        in_features=old.in_features,
-        out_features=old.out_features,
-        bias=old.bias is not None,
-        input_is_parallel=input_is_parallel,
         dtype=old.weight.dtype,
         name=attr,
     )
